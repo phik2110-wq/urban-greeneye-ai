@@ -1,0 +1,7 @@
+streamlit
+requests
+Pillow
+streamlit-folium
+folium
+google-generativeai
+pandas
