@@ -5,3 +5,7 @@ streamlit-folium
 folium
 google-generativeai
 pandas
+google-genai
+python-dotenv
+supabase
+numpy
