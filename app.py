@@ -1261,10 +1261,11 @@ html, body, .stApp { color-scheme: light !important; }
     border-radius: 14px !important;
 }
 .stApp [data-testid="stExpander"] summary * { color: #111111 !important; }
-/* Khung rỗng chứa đoạn script chặn tự dịch */
-iframe[height="0"] { display: none !important; }
-.stApp [data-testid="stElementContainer"]:has(> iframe[height="0"]),
-.stApp [data-testid="element-container"]:has(> iframe[height="0"]) { display: none !important; }
+/* Chỉ ẩn khung rỗng chứa đoạn script chặn tự dịch. KHÔNG ẩn mọi iframe có height=0: các bản đồ
+   (streamlit-folium) cũng là iframe bắt đầu với height=0 rồi mới tự giãn ra, ẩn chúng sẽ làm bản đồ trống. */
+iframe[title="streamlit.components.v1.html"] { display: none !important; }
+.stApp [data-testid="stElementContainer"]:has(iframe[title="streamlit.components.v1.html"]),
+.stApp [data-testid="element-container"]:has(iframe[title="streamlit.components.v1.html"]) { display: none !important; }
 </style>
 """,
     unsafe_allow_html=True,
