@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import folium
-from folium.plugins import HeatMap, MarkerCluster
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -61,6 +60,7 @@ components.html(
     height=0,
 )
 
+APP_VERSION = "2026-11-08-b"  # đổi số này mỗi lần sửa để biết bản nào đang chạy trên Streamlit Cloud
 CF_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 MAX_IMAGE_MB = 10
 SPAM_RETENTION_DAYS = 7
@@ -1261,11 +1261,6 @@ html, body, .stApp { color-scheme: light !important; }
     border-radius: 14px !important;
 }
 .stApp [data-testid="stExpander"] summary * { color: #111111 !important; }
-/* Chỉ ẩn khung rỗng chứa đoạn script chặn tự dịch. KHÔNG ẩn mọi iframe có height=0: các bản đồ
-   (streamlit-folium) cũng là iframe bắt đầu với height=0 rồi mới tự giãn ra, ẩn chúng sẽ làm bản đồ trống. */
-iframe[title="streamlit.components.v1.html"] { display: none !important; }
-.stApp [data-testid="stElementContainer"]:has(iframe[title="streamlit.components.v1.html"]),
-.stApp [data-testid="element-container"]:has(iframe[title="streamlit.components.v1.html"]) { display: none !important; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -2555,71 +2550,27 @@ def parse_location_coordinates(location):
 # 6. UI HELPERS
 # =========================================================
 
-# Nguồn bản đồ. Lưu ý: CARTO đã yêu cầu API key (hiện chữ "API KEY REQUIRED" trên bản đồ) nên KHÔNG dùng nữa.
-# Esri là nguồn chính; nếu 4 giây mà không tải được ô nào thì tự chuyển sang OpenStreetMap rồi các nguồn khác.
-# Người dùng cũng tự đổi được nguồn bằng nút lớp bản đồ ở góc phải trên.
-MAP_MAIN_TILES = {
-    "name": "Bản đồ đường (Esri)",
-    "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-    "attribution": "Tiles © Esri",
-}
-MAP_FALLBACK_TILES = [
-    {
-        "name": "OpenStreetMap",
-        "url": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-        "attribution": "© OpenStreetMap contributors",
-        "subdomains": "abc",
-    },
-    {
-        "name": "OpenStreetMap (HOT)",
-        "url": "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
-        "attribution": "© OpenStreetMap contributors, Humanitarian OSM Team",
-        "subdomains": "abc",
-    },
-    {
-        "name": "Vệ tinh (Esri)",
-        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "attribution": "Tiles © Esri",
-        "subdomains": "abc",
-    },
+# Nguồn bản đồ. CARTO đã yêu cầu API key (hiện chữ "API KEY REQUIRED") nên KHÔNG dùng nữa.
+# Esri là lớp mặc định (không cần khóa). Nếu một nguồn bị lỗi trên máy ai đó, họ đổi sang OpenStreetMap
+# hoặc ảnh vệ tinh bằng nút lớp bản đồ ở góc phải trên. Tất cả là thành phần có sẵn của folium/Leaflet.
+MAP_TILE_LAYERS = [
+    ("Bản đồ đường (Esri)",
+     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+     "Tiles © Esri", None),
+    ("OpenStreetMap",
+     "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+     "© OpenStreetMap contributors", "abc"),
+    ("OpenStreetMap (HOT)",
+     "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+     "© OpenStreetMap contributors, Humanitarian OSM Team", "abc"),
+    ("Vệ tinh (Esri)",
+     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+     "Tiles © Esri", None),
 ]
-
-_MAP_FALLBACK_JS = r"""
-window.addEventListener("load", function () {
-  try {
-    var m = __MAP__;
-    var main = __MAIN__;
-    var defs = __PROVIDERS__;
-    var layers = [main];
-    defs.forEach(function (p) {
-      layers.push(L.tileLayer(p.url, { attribution: p.attribution, subdomains: p.subdomains || "abc", maxZoom: 19 }));
-    });
-    var base = {};
-    base[__MAIN_NAME__] = main;
-    defs.forEach(function (p, i) { base[p.name] = layers[i + 1]; });
-    L.control.layers(base, null, { collapsed: true, position: "topright" }).addTo(m);
-
-    var idx = 0, tries = 0;
-    setTimeout(function () { try { m.invalidateSize(); } catch (e) {} }, 300);
-    var timer = setInterval(function () {
-      try {
-        tries += 1;
-        if (document.querySelectorAll(".leaflet-tile-loaded").length > 0) { clearInterval(timer); return; }
-        if (tries >= 2) {
-          if (idx + 1 >= layers.length) { if (tries >= 6) { clearInterval(timer); } return; }
-          m.removeLayer(layers[idx]);
-          idx += 1; tries = 0;
-          layers[idx].addTo(m);
-        }
-      } catch (e) { clearInterval(timer); }
-    }, 2000);
-  } catch (e) {}
-});
-"""
 
 
 def make_base_map(location, zoom_start=13):
-    """Bản đồ nền dùng chung cho mọi trang: tự chuyển nguồn khi bản đồ bị xám, có nút đổi nguồn thủ công."""
+    """Bản đồ nền dùng chung cho mọi trang, có nút đổi nguồn bản đồ."""
     fmap = folium.Map(
         location=location,
         zoom_start=zoom_start,
@@ -2627,21 +2578,12 @@ def make_base_map(location, zoom_start=13):
         tiles=None,
         prefer_canvas=True,
     )
-    main = folium.TileLayer(
-        tiles=MAP_MAIN_TILES["url"],
-        attr=MAP_MAIN_TILES["attribution"],
-        name=MAP_MAIN_TILES["name"],
-        max_zoom=19,
-    )
-    main.add_to(fmap)
-    js = (
-        _MAP_FALLBACK_JS
-        .replace("__MAP__", fmap.get_name())
-        .replace("__MAIN__", main.get_name())
-        .replace("__MAIN_NAME__", json.dumps(MAP_MAIN_TILES["name"], ensure_ascii=False))
-        .replace("__PROVIDERS__", json.dumps(MAP_FALLBACK_TILES, ensure_ascii=False))
-    )
-    fmap.get_root().script.add_child(folium.Element(js))
+    for index, (name, url, attribution, subdomains) in enumerate(MAP_TILE_LAYERS):
+        options = {"tiles": url, "attr": attribution, "name": name, "max_zoom": 19, "show": index == 0}
+        if subdomains:
+            options["subdomains"] = subdomains
+        folium.TileLayer(**options).add_to(fmap)
+    folium.LayerControl(collapsed=True, position="topright").add_to(fmap)
     return fmap
 
 
@@ -3466,30 +3408,87 @@ def page_hotspots():
         st.warning("Chưa có báo cáo nào có tọa độ hợp lệ. Hãy chọn vị trí trên bản đồ khi gửi báo cáo.")
         return
 
-    avg_lat = sum(p[1] for p in points) / len(points)
-    avg_lng = sum(p[2] for p in points) / len(points)
-    fmap = make_base_map([avg_lat, avg_lng], 13)
-    HeatMap([[lat, lng, 1.0 if row.get("status") != "Đã dọn" else 0.35] for row, lat, lng in points], radius=28, blur=20, min_opacity=0.25).add_to(fmap)
-    cluster = MarkerCluster(name="Các báo cáo").add_to(fmap)
-
+    # Gom các báo cáo gần nhau (ô ~110 m) thành một "điểm nóng" có số báo cáo. Chỉ dùng thành phần có sẵn của
+    # Leaflet (vòng tròn + nhãn số), KHÔNG dùng HeatMap/MarkerCluster vì chúng tải thêm thư viện JS từ CDN ngoài:
+    # khi tải lỗi thì cả bản đồ trống. Bản đồ được vẽ thẳng bằng HTML tĩnh nên cũng không phụ thuộc streamlit-folium.
+    cells = {}
     for row, lat, lng in points:
-        status = str(row.get("status") or "Chưa rõ")
-        color = "green" if status == "Đã dọn" else ("orange" if status == "Đang dọn" else "red")
-        code = escape(report_title(row))
-        location = escape(str(row.get("location") or "Chưa có địa chỉ"))
-        description = escape(str(row.get("description") or "Không có mô tả"))
-        popup = folium.Popup(
-            f"<b>Báo cáo #{code}</b><br>Trạng thái: {escape(status)}<br>Địa điểm: {location}<br>Nội dung: {description}",
-            max_width=320,
-        )
-        folium.Marker(
-            [lat, lng], tooltip=f"#{code} · {status}", popup=popup,
-            icon=folium.Icon(color=color, icon="trash", prefix="fa"),
-        ).add_to(cluster)
+        cells.setdefault((round(lat, 3), round(lng, 3)), []).append((row, lat, lng))
 
-    folium.LayerControl(collapsed=True).add_to(fmap)
-    st_folium(fmap, width=None, height=560, returned_objects=[], key="greeneye_hotspots_map")
-    st.caption(f"Có {len(points)} báo cáo được hiển thị trên bản đồ; báo cáo thiếu tọa độ sẽ không xuất hiện.")
+    fmap = make_base_map(
+        [sum(p[1] for p in points) / len(points), sum(p[2] for p in points) / len(points)], 13
+    )
+    for items in cells.values():
+        count = len(items)
+        lat = sum(i[1] for i in items) / count
+        lng = sum(i[2] for i in items) / count
+        statuses = {str(i[0].get("status") or "") for i in items}
+        if statuses - {"Đã dọn", "Đang dọn"}:
+            color = "#d32f2f"          # còn báo cáo chưa ai nhận/chưa xử lý
+        elif "Đang dọn" in statuses:
+            color = "#ef8a00"          # đang có đội dọn
+        else:
+            color = "#2e7d32"          # đã dọn xong hết
+
+        lines = []
+        for row, _lat, _lng in items[:6]:
+            lines.append(
+                f"<b>#{escape(report_title(row))}</b> · {escape(str(row.get('status') or 'Chưa rõ'))}<br>"
+                f"{escape(str(row.get('location') or 'Chưa có địa chỉ'))}<br>"
+                f"<i>{escape(str(row.get('description') or 'Không có mô tả'))[:140]}</i>"
+            )
+        if count > 6:
+            lines.append(f"... và {count - 6} báo cáo khác")
+        popup_html = "<div style='max-width:280px'>" + "<hr style='margin:6px 0'>".join(lines) + "</div>"
+
+        # Vùng "nóng" mờ phía sau, to dần theo số báo cáo
+        folium.Circle(
+            [lat, lng], radius=110 + 70 * min(count, 6), color=color, weight=0,
+            fill=True, fill_color=color, fill_opacity=0.16,
+        ).add_to(fmap)
+        size = 30 + min(count, 6) * 3
+        folium.Marker(
+            [lat, lng],
+            tooltip=f"{count} báo cáo",
+            popup=folium.Popup(popup_html, max_width=300),
+            icon=folium.DivIcon(
+                html=(
+                    f"<div style='width:{size}px;height:{size}px;border-radius:50%;background:{color};"
+                    "color:#fff;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);display:flex;"
+                    f"align-items:center;justify-content:center;font:800 15px sans-serif'>{count}</div>"
+                ),
+                icon_size=(size, size),
+                icon_anchor=(size // 2, size // 2),
+            ),
+        ).add_to(fmap)
+
+    if len(points) > 1:
+        lats = [p[1] for p in points]
+        lngs = [p[2] for p in points]
+        fmap.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]], padding=(40, 40), max_zoom=16)
+
+    components.html(fmap.get_root().render(), height=580)
+    st.caption(
+        "🔴 chưa xử lý  •  🟠 đang dọn  •  🟢 đã dọn  •  số trong vòng tròn là số báo cáo trong khu vực ~110 m. "
+        f"Có {len(points)} báo cáo được hiển thị; báo cáo thiếu tọa độ sẽ không xuất hiện."
+    )
+
+    with st.expander("🗺️ Bản đồ không hiện? Xem danh sách điểm và bản đồ dự phòng"):
+        st.markdown("Bấm vào địa điểm để mở Google Maps.")
+        listing = []
+        for row, lat, lng in points[:200]:
+            place = str(row.get("location") or "Chưa có địa chỉ").replace("[", "(").replace("]", ")")
+            listing.append(
+                f"- **#{report_title(row)}** · {row.get('status') or 'Chưa rõ'} · "
+                f"{format_vn_time(row.get('created_at'), with_ago=False)} · "
+                f"[{place}](https://www.google.com/maps?q={lat},{lng})"
+            )
+        st.markdown("\n".join(listing))
+        try:
+            import pandas as pd
+            st.map(pd.DataFrame({"lat": [p[1] for p in points], "lon": [p[2] for p in points]}))
+        except Exception:
+            pass
 
 
 # =========================================================
@@ -3888,6 +3887,7 @@ def sidebar_menu():
             unsafe_allow_html=True,
         )
         _nav_button(MENU_ADMIN)
+        st.caption(f"Phiên bản {APP_VERSION}")
 
     return st.session_state["nav_page"]
 
